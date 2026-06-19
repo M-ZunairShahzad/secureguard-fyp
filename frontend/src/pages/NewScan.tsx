@@ -3,10 +3,10 @@ import { useSearchParams } from "react-router-dom";
 import DashboardLayout from "@/components/dashboard/DashboardLayout";
 import { useCurrentUser } from "@/hooks/use-current-user";
 import {
-  triggerScan,
   getBranchFiles,
   triggerUploadedFileScan,
   triggerUploadedFileScanStream,
+  triggerGithubScanStream,
   ScanResult,
   VulnerabilityDetail,
   ScanStreamEvent,
@@ -20,8 +20,7 @@ import {
   listPersonalGithubRepos,
   listPersonalGithubBranches,
   fetchPersonalGithubFiles,
-  fetchProjectFileContent,
-  triggerProjectScan,
+  fetchPersonalGithubFileContent,
   type GitHubRepoSummary,
 } from "@/lib/projects-api";
 import { fetchBranchFiles, fetchFileContent as fetchTeamFileContent, listTeams } from "@/lib/teams-api";
@@ -1481,9 +1480,14 @@ const NewScan = () => {
         }
         let previewLines = buildQueuedSourcePreview(files);
         const previewFile = files.find((filePath) => extensionOf(filePath) !== ".zip") ?? files[0];
-        if (previewFile && resolvedProjectId && extensionOf(previewFile) !== ".zip") {
+        if (previewFile && extensionOf(previewFile) !== ".zip") {
           try {
-            const content = await fetchProjectFileContent(resolvedProjectId, branch, previewFile);
+            const content = await fetchPersonalGithubFileContent(
+              githubInstallationId,
+              selectedGithubRepo.full_name,
+              branch,
+              previewFile,
+            );
             previewLines = codeLinesFromSource(`// ${previewFile}\n${content.content}`);
           } catch (err: any) {
             addLog(`Could not load live source preview for ${previewFile}; scanning will continue.`, "warning");
@@ -1520,16 +1524,18 @@ const NewScan = () => {
         addLog("Reviewing files for vulnerabilities...", "info");
         addLog("This may take a moment depending on file count...", "info");
 
-        const result = await triggerProjectScan(
-          resolvedProjectId,
-          branch,
-          files,
+        const result = await triggerGithubScanStream(
+          `/projects/${resolvedProjectId}/scans/stream`,
           {
+            branch,
+            selected_files: files,
             project_id: resolvedProjectId ?? "",
             project_name: resolvedProjectName ?? "",
             installation_id: githubInstallationId,
             repo_full_name: selectedGithubRepo.full_name,
-          }
+          },
+          handleScanStreamEvent,
+          scanAbortControllerRef.current?.signal,
         );
 
         clearInterval(timerInterval);
@@ -1650,10 +1656,17 @@ const NewScan = () => {
         addLog("Reviewing files for vulnerabilities...", "info");
         addLog("This may take a moment depending on file count...", "info");
 
-        const result = await triggerScan(effectiveTeamId, branch, files, {
-          project_id: resolvedProjectId ?? "",
-          project_name: resolvedProjectName ?? "",
-        });
+        const result = await triggerGithubScanStream(
+          `/teams/${effectiveTeamId}/scans/stream`,
+          {
+            branch,
+            selected_files: files,
+            project_id: resolvedProjectId ?? "",
+            project_name: resolvedProjectName ?? "",
+          },
+          handleScanStreamEvent,
+          scanAbortControllerRef.current?.signal,
+        );
 
         clearInterval(timerInterval);
         if (previewInterval) clearInterval(previewInterval);

@@ -240,6 +240,50 @@ export async function triggerScan(
   });
 }
 
+export async function triggerGithubScanStream(
+  path: string,
+  body: Record<string, unknown>,
+  onEvent: (event: ScanStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<ScanResult> {
+  const { supabase } = await import("@/lib/supabase");
+  const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) throw new Error("Not authenticated");
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    const json = await response.json().catch(() => ({}));
+    throw new Error(json.detail ?? `Scan failed: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: ScanResult | null = null;
+  const consume = (raw: string) => {
+    if (!raw.trim()) return;
+    const event = JSON.parse(raw) as ScanStreamEvent;
+    onEvent(event);
+    if (event.event === "error") throw new Error(event.message);
+    if (event.event === "scan_result") finalResult = event.result;
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    lines.forEach(consume);
+  }
+  consume(buffer);
+  if (!finalResult) throw new Error("No scan results returned");
+  return finalResult;
+}
+
 export async function triggerUploadedFileScan(
   files: File[],
   extra?: { project_id?: string; project_name?: string }

@@ -311,6 +311,21 @@ export async function fetchProjectFileContent(
   );
 }
 
+export async function fetchPersonalGithubFileContent(
+  installationId: number,
+  repo: string,
+  branch: string,
+  filePath: string
+): Promise<FileContentResponse> {
+  const params = new URLSearchParams({
+    installation_id: String(installationId),
+    repo,
+    branch,
+    path: filePath,
+  });
+  return apiFetch<FileContentResponse>(`/projects/github/personal/files/content?${params.toString()}`);
+}
+
 /**
  * POST /projects/:projectId/scans
  * Fetch selected files from GitHub and run the vulnerability scanner.

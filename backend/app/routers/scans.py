@@ -210,6 +210,43 @@ async def start_scan(
 
     return ScanResponse(**result)
 
+
+@router.post("/{team_id}/scans/stream")
+async def stream_team_scan(
+    team_id: str,
+    body: ScanRequest,
+    current_user=Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    started_at = time.time()
+    link_project_to_team(team_id, body.project_id, current_user.id, supabase)
+    files_dict = await scanner_service.fetch_selected_code_hybrid(
+        team_id, body.branch, body.selected_files, current_user.id, supabase
+    )
+    save_scanned_sources_zip(body.project_id, current_user.id, files_dict, supabase)
+    scan_id = create_scan_started(supabase, current_user.id, body.project_id, files_dict, "github")
+
+    def events():
+        for event in scanner_service.iter_vulnerability_scanner_events(files_dict):
+            if event.get("event") == "scan_started":
+                event = {**event, "scan_id": scan_id}
+            if event.get("event") == "error":
+                mark_scan_failed(supabase, scan_id, event.get("message", "Scan failed"))
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+                return
+            if event.get("event") == "scan_result":
+                result = event["result"]
+                persisted = save_scan_success(
+                    supabase, current_user.id, body.project_id, scan_id, files_dict,
+                    result, int(time.time() - started_at),
+                )
+                result["scan_id"] = scan_id
+                result["scan_persistence"] = persisted
+                event = {"event": "scan_result", "result": result}
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson", headers={"X-Accel-Buffering": "no"})
+
 @router.post("/scan/upload", response_model=ScanResponse)
 async def scan_uploaded_file(
     body: UploadScanRequest,

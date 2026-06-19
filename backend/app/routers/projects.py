@@ -9,9 +9,11 @@
 #    otherwise never reach the more-specific "/files/content" path.
 # ---------------------------------------------------------------------------
 
+import json
 import time
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import StreamingResponse
 from supabase import Client
 
 from app.dependencies import get_supabase, get_current_user
@@ -112,6 +114,29 @@ async def personal_github_files(
     current_user=Depends(get_current_user),
 ):
     return await project_github_service.list_runtime_files(installation_id, repo, branch)
+
+
+@router.get("/github/personal/files/content", response_model=FileContentResponse)
+async def personal_github_file_content(
+    installation_id: int = Query(...),
+    repo: str = Query(...),
+    branch: str = Query(...),
+    path: str = Query(...),
+    current_user=Depends(get_current_user),
+):
+    files = await project_github_service.fetch_selected_code_runtime(
+        installation_id, repo, branch, [path]
+    )
+    if path not in files:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="GitHub file was not found.")
+    content = files[path]
+    return FileContentResponse(
+        branch=branch,
+        path=path,
+        content=content,
+        size=len(content.encode("utf-8")),
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -381,3 +406,43 @@ async def start_project_scan(
     result["scan_id"] = persistence["scan_id"]
 
     return ScanResponse(**result)
+
+
+@router.post("/{project_id}/scans/stream")
+async def stream_project_scan(
+    project_id: str,
+    body: ScanRequest,
+    current_user=Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    started_at = time.time()
+    if not body.installation_id or not body.repo_full_name:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="GitHub installation and repository are required.")
+    files_dict = await project_github_service.fetch_selected_code_runtime(
+        body.installation_id, body.repo_full_name, body.branch, body.selected_files
+    )
+    save_github_source_metadata(
+        project_id, current_user.id, body.repo_full_name, body.branch, files_dict, supabase
+    )
+    scan_id = create_scan_started(supabase, current_user.id, project_id, files_dict, "github")
+
+    def events():
+        for event in scanner_service.iter_vulnerability_scanner_events(files_dict):
+            if event.get("event") == "scan_started":
+                event = {**event, "scan_id": scan_id}
+            if event.get("event") == "error":
+                mark_scan_failed(supabase, scan_id, event.get("message", "Scan failed"))
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+                return
+            if event.get("event") == "scan_result":
+                result = event["result"]
+                persistence = save_scan_success(
+                    supabase, current_user.id, project_id, scan_id, files_dict,
+                    result, int(time.time() - started_at),
+                )
+                result["scan_id"] = persistence["scan_id"]
+                event = {"event": "scan_result", "result": result}
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson", headers={"X-Accel-Buffering": "no"})

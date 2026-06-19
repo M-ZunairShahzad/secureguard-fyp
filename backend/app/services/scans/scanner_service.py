@@ -1,6 +1,7 @@
 import httpx
 import asyncio
 import io
+import traceback
 import zipfile
 import base64
 from fastapi import HTTPException, status
@@ -13,6 +14,26 @@ from app.services.model_scanner.graph_runner import SyntaxValidationError, iter_
 
 GITHUB_API = "https://api.github.com"
 C_CPP_EXTENSIONS = ('.c', '.cpp', '.h', '.hpp', '.cc', '.cxx', '.hxx')
+
+
+def _run_analysis_to_result(file_path: str, source_code: str) -> dict:
+    """Consume the event-producing analysis generator and return its result.
+
+    The project/team GitHub scan endpoints are non-streaming. ``run_analysis``
+    became an event generator when model/correction deltas were added, so these
+    callers must consume it instead of indexing the generator itself.
+    """
+    analysis = run_analysis(file_path, source_code)
+    if isinstance(analysis, dict):
+        return analysis
+    while True:
+        try:
+            next(analysis)
+        except StopIteration as completed:
+            result = completed.value
+            if not isinstance(result, dict):
+                raise RuntimeError("Model scan ended before returning a result.")
+            return result
 
 
 def _safe_chunk_count(result: dict, source_code: str) -> int:
@@ -219,7 +240,7 @@ async def run_vulnerability_scanner(files_dict: Dict[str, str]) -> dict:
             continue
 
         try:
-            result = run_analysis(file_path, source_code)
+            result = _run_analysis_to_result(file_path, source_code)
 
             # Tag each vulnerability with which file it came from
             for vuln in result["vulnerabilities"]:
@@ -413,11 +434,22 @@ def iter_vulnerability_scanner_events(files_dict: Dict[str, str]):
                 "message": f"Model scan failed for {file_path}: Request timeout exceeded. Please try again.",
             }
             return
-        except Exception:
+        except Exception as exc:
+            # Do not discard the underlying scanner/provider failure. The
+            # generic message made local and production failures impossible to
+            # distinguish (invalid model JSON, provider error, parser error,
+            # etc.) and left the UI with no actionable information.
+            print(f"[scanner_service] Failed to scan {file_path}: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
+            detail = str(exc).strip()
             yield {
                 "event": "error",
                 "status_code": status.HTTP_502_BAD_GATEWAY,
-                "message": f"Model scan failed for {file_path}. Please try again.",
+                "message": (
+                    f"Model scan failed for {file_path}: {detail}"
+                    if detail
+                    else f"Model scan failed for {file_path}. Please try again."
+                ),
             }
             return
 

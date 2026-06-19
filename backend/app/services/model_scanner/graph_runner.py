@@ -527,12 +527,18 @@ def iter_model_response(system_prompt: str, user_prompt: str, required_key: str 
         groq_url = f"{groq_base.rstrip('/')}/chat/completions"
         groq_model = (getattr(settings, "groq_model_name", "meta-llama/llama-4-scout-17b-16e-instruct") or "meta-llama/llama-4-scout-17b-16e-instruct").strip()
         headers = {"Authorization": f"Bearer {groq_key}"}
-        groq_payload = {**payload, "model": groq_model, "stream": False}
+        groq_payload = {**payload, "model": groq_model, "stream": True}
         groq_payload.pop("repeat_penalty", None)
         for attempt in range(2):
             try:
                 started_at = time.monotonic()
-                response = requests.post(groq_url, json=groq_payload, timeout=(10, MODEL_PASS_TIMEOUT_SECONDS), headers=headers)
+                response = requests.post(
+                    groq_url,
+                    json=groq_payload,
+                    timeout=(10, MODEL_PASS_TIMEOUT_SECONDS),
+                    headers=headers,
+                    stream=True,
+                )
                 if time.monotonic() - started_at > MODEL_PASS_TIMEOUT_SECONDS:
                     print(f"[model_scanner] groq timeout: model={groq_model}")
                     return "", "Request timeout exceeded. Please try again."
@@ -551,13 +557,30 @@ def iter_model_response(system_prompt: str, user_prompt: str, required_key: str 
                 if response.status_code != 200:
                     print(f"[model_scanner] groq error: status={response.status_code} model={groq_model} body={response.text[:300]}")
                     return "", f"GROQ API error: {response.status_code} - {response.text}"
-                data = response.json()
-                choices = data.get("choices") or []
-                content = choices[0].get("message", {}).get("content", "") if choices else ""
+                content_parts: list[str] = []
+                for raw_line in response.iter_lines(chunk_size=1, decode_unicode=True):
+                    line = (raw_line or "").strip()
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    if line == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {}).get("content")
+                    if delta:
+                        content_parts.append(delta)
+                        yield {"event": "model_delta", "text": delta}
+                content = "".join(content_parts)
                 parsed_content = extract_json_object(content) if required_key else {}
                 if content and (not required_key or required_key in parsed_content):
                     print(f"[model_scanner] groq success: model={groq_model}")
-                    yield {"event": "model_delta", "text": content}
                     return content, ""
                 if content and required_key:
                     print(f"[model_scanner] groq invalid response: missing={required_key} model={groq_model}")
