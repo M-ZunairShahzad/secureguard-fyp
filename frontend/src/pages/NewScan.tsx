@@ -1454,8 +1454,8 @@ const NewScan = () => {
         addLog(`Error: ${message}`, "warning");
       }
 
-      setIsScanning(false);
       setScanComplete(true);
+      setIsScanning(false);
       return;
     }
 
@@ -1582,9 +1582,9 @@ const NewScan = () => {
         addLog(`Error: ${message}`, "warning");
       }
 
+      setScanComplete(true);
       setIsScanning(false);
       scanAbortControllerRef.current = null;
-      setScanComplete(true);
       return;
     }
 
@@ -1704,8 +1704,8 @@ const NewScan = () => {
         addLog(`Error: ${message}`, "warning");
       }
 
-      setIsScanning(false);
       setScanComplete(true);
+      setIsScanning(false);
       return;
     }
   };
@@ -2216,7 +2216,17 @@ const NewScan = () => {
   };
 
   // If scanning or complete, show split-screen view
-  if ((isScanning || scanComplete) && showLiveScan) {
+  // The stream/result/error data is authoritative evidence that a scan view
+  // exists. Do not drop back to the setup form merely because React processes
+  // the persisted status flags in separate renders.
+  const hasLiveScanView =
+    isScanning ||
+    scanComplete ||
+    Boolean(scanError) ||
+    Boolean(scanResult) ||
+    displayedChunks.length > 0;
+
+  if (hasLiveScanView && showLiveScan) {
     if (autoRescanPreparing) {
       return (
         <DashboardLayout>
